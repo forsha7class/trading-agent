@@ -1,0 +1,20 @@
+symbols: [BTCUSDT, ETHUSDT, SOLUSDT]
+timeframes:
+  scalping: [4h, 1h, 15m, 5m]
+  swing: [1d, 4h, 1h, 15m]
+timeframe_weights:
+  "4h": 0.3
+  "1h": 0.3
+  "15m": 0.25
+  "5m": 0.15
+risk_per_trade: 0.005
+daily_loss_limit: 0.02
+max_positions: 3
+max_leverage: 3.0
+min_rr: 1.5
+fee: 0.0004
+slippage: 0.0005
+db_path: "storage/trading.db"
+binance_base: "https://api.binance.com"
+stale_multiplier: 2.0
+min_bars: 50
