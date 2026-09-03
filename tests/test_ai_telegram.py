@@ -166,6 +166,40 @@ def test_tg_format_signal():
     assert "guaranteed" not in msg.lower() and "profit guaranteed" not in msg.lower()
     print("tg_format_signal PASS")
 
+def test_tg_special_chars_plain_text():
+    from agents import telegram_notifier as tg
+    _tg_creds_set()
+    tg._last_sent.clear()
+    import agents.telegram_notifier as m
+    captured = {}
+    real = m.httpx.post
+    def fake_post(url, **kw):
+        captured["url"] = url
+        captured["payload"] = kw.get("json")
+        class _R:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"ok": True}
+        return _R()
+    m.httpx.post = fake_post
+    try:
+        # risk-veto reasons contain '<' (e.g. "RR 1.50 < 1.5"); with HTML
+        # parse_mode Telegram rejects them with HTTP 400. Must be plain text.
+        res = tg.notify(tg.EVENT_RISK_REJECT, {
+            "symbol": "BTCUSDT", "decision": "NO_TRADE",
+            "reason": "NO_TRADE: RR_INSUFFICIENT — veto NO_INVALID_RR: RR 1.50 < 1.5 & A > B",
+            "decision_id": "VETO<&>"})
+        assert res["sent"] is True, res
+        assert "parse_mode" not in captured["payload"], captured["payload"]
+        txt = captured["payload"]["text"]
+        assert "<" in txt and ">" in txt and "&" in txt, txt
+        assert "decision_id" not in txt  # not required; payload shape sanity only
+    finally:
+        m.httpx.post = real
+        tg._last_sent.clear(); _reset_env()
+    print("tg_special_chars_plain_text PASS")
+
 def test_tg_dedup():
     from agents import telegram_notifier as tg
     _tg_creds_set()
@@ -226,6 +260,7 @@ if __name__=="__main__":
     test_malformed_llm_to_unavailable()
     test_tg_missing_credentials_nonfatal()
     test_tg_format_signal()
+    test_tg_special_chars_plain_text()
     test_tg_dedup()
     test_tg_failure_nonfatal()
     test_redact_secret()

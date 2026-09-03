@@ -67,12 +67,14 @@ def _allow_send(event_type: str, stable_id: str, cooldown_s: float) -> bool:
         return True
 
 
-def _send_text(text: str, token: str, chat_id: str, parse_mode: str = "HTML") -> dict:
-    """POST to Telegram; raises on failure so caller can log+swallow. Never logs token."""
+def _send_text(text: str, token: str, chat_id: str) -> dict:
+    """POST to Telegram (plain text, no HTML parse_mode — reasons may contain
+    <, >, & which Telegram's HTML parser rejects with HTTP 400); raises on
+    failure so caller can log+swallow. Never logs token."""
     if len(text) > 4000:
         text = text[:3990] + "\n…(truncated)"
     r = httpx.post(f"{_API}{token}/sendMessage",
-                   json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
+                   json={"chat_id": chat_id, "text": text},
                    timeout=10)
     r.raise_for_status()
     return r.json()
