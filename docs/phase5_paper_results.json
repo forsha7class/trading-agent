@@ -1,0 +1,27 @@
+{
+  "frozen": {
+    "fee": 0.0004,
+    "slippage": 0.0005,
+    "risk_pct": 0.005,
+    "min_rr": 1.5,
+    "horizon": 20
+  },
+  "symbols": {
+    "BTCUSDT": {
+      "symbol": "BTCUSDT",
+      "candles_total": 900,
+      "fresh_candles": 3,
+      "status": "INSUFFICIENT_DATA",
+      "note": "only 3 post-phase4 candles; need >=60"
+    },
+    "ETHUSDT": {
+      "symbol": "ETHUSDT",
+      "candles_total": 900,
+      "fresh_candles": 3,
+      "status": "INSUFFICIENT_DATA",
+      "note": "only 3 post-phase4 candles; need >=60"
+    }
+  },
+  "generated_at": 1788414393622,
+  "spec": "docs/PAPER_FINAL_SPEC.md"
+}

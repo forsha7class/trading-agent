@@ -86,24 +86,29 @@ class Coordinator:
             "spread_pct":kw.get("spread_pct",0),
         }
 
-        # 10. LLM bounded review (optional, never overrides risk)
-        try:
-            from agents.analyst import analyze as analyst_fn
-            from agents.signal_reviewer import review as sig_review_fn
-            from agents.risk_reviewer import review as risk_review_fn
-            analyst_out=analyst_fn({"features":feats,"regime":regime_dict,"ensemble":ens_dict,"probability":prob_dict})
-            sig_rev=sig_review_fn({"ensemble":ens_dict,"regime":regime_dict,"mtf":mtf_dict,"probability":prob_dict})
-            # risk reviewer needs entry/stop; let DecisionEngine derive first pass then reviewer validates via RiskEngine directly
-            # we skip risk reviewer here to avoid circular; DecisionEngine will run RiskEngine
-            _ = (analyst_out, sig_rev)
-        except Exception:
-            pass
+        # AI_REVIEW precedes DECISION in the state machine (advisory layer ran).
+        sm.transition("AI_REVIEW", "review done (bounded)")
 
-        sm.transition("AI_REVIEW","review done (bounded)")
-
-        # 11. decision (risk enforced inside)
+        # 11. decision (risk enforced inside — authoritative, unchanged)
         dec=DecisionEngine().decide(ctx)
-        sm.transition("DECISION", dec.get("reason",""))
+        sm.transition("DECISION", (dec.get("reason") or "")[:120])
+
+        # 11b. Bounded AI decision-support review (Phase 5). Runs AFTER the
+        # authoritative quant decision. Advisory only — never changes `dec`,
+        # never overrides the hard RiskEngine veto already applied inside
+        # DecisionEngine, and cannot raise any risk limit.
+        ai_review = {}
+        try:
+            from agents.ai_contract import run_review
+            ai_review = run_review(
+                {**ctx,
+                 "features": feats, "regime": regime_dict,
+                 "ensemble": ens_dict, "probability": prob_dict,
+                 "mtf": mtf_dict,
+                 "proposed_direction": ens_dict.get("direction", "NO_TRADE")},
+                decision=dec, use_llm=False)
+        except Exception:
+            ai_review = {}
 
         # 12. persist
         try:
@@ -112,6 +117,11 @@ class Coordinator:
             # json fields need dumps handling inside insert_decision already
             insert_decision(dd)
             log_event("coordinator","info",f"decision {dec.get('decision')} {dec.get('reason','')[:120]}",{"symbol":symbol,"decision":dec.get("decision")})
+            # persist bounded AI review record (decision-support audit)
+            if ai_review:
+                import json as _json
+                log_event("ai_contract","info",f"AI review status={ai_review.get('status')} dir={ai_review.get('assessment','')[:80]}",
+                          {"symbol":symbol,"decision":dec.get("decision"),"review":_json.dumps(ai_review,default=str)})
         except Exception as e:
             # failure to persist still returns decision but logs
             pass
