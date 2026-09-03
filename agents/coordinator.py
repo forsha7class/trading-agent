@@ -1,6 +1,11 @@
 """Coordinator — enforces pipeline order, collects outputs, never bypasses risk."""
 from __future__ import annotations
 import time
+try:
+    from storage.database import _append_only_trigger  # ensure decisions append-only guard
+    _append_only_trigger()
+except Exception:
+    pass
 
 class Coordinator:
     def run(self, symbol:str="BTCUSDT", timeframe:str="1h", candles:list[dict]|None=None, equity:float=10000, **kw)->dict:
@@ -17,7 +22,7 @@ class Coordinator:
         from trade_signal.mtf import check_mtf
         from evaluation.metrics import max_drawdown as _mdd
         from decision.engine import DecisionEngine
-        from storage.database import init_db, insert_decision, log_event
+        from storage.database import init_db, insert_decision, log_event, get_db
         from decision.state_machine import DecisionStateMachine
 
         sm=DecisionStateMachine()
@@ -115,12 +120,19 @@ class Coordinator:
         except Exception:
             ai_review = {}
 
-        # 12. persist
+        # 12. persist (single authoritative insert; append-only)
         try:
             init_db()
             dd=dec.to_dict() if hasattr(dec,'to_dict') else (dec.__dict__ if hasattr(dec,'__dict__') else dec)
             # json fields need dumps handling inside insert_decision already
-            insert_decision(dd)
+            existing = get_db().execute("SELECT id FROM decisions WHERE symbol=? AND ts=? ORDER BY id DESC LIMIT 1",
+                                        (dd.get("symbol"), dd.get("ts") or dd.get("timestamp"))).fetchone()
+            if existing is None:
+                insert_decision(dd)
+                existing = get_db().execute("SELECT id FROM decisions WHERE symbol=? AND ts=? ORDER BY id DESC LIMIT 1",
+                                            (dd.get("symbol"), dd.get("ts") or dd.get("timestamp"))).fetchone()
+            if existing is not None and hasattr(dec, "id"):
+                dec.id = int(existing["id"])
             log_event("coordinator","info",f"decision {dec.get('decision')} {dec.get('reason','')[:120]}",{"symbol":symbol,"decision":dec.get("decision")})
             # persist bounded AI review record (decision-support audit)
             if ai_review:

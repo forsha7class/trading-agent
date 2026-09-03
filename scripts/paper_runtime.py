@@ -49,18 +49,35 @@ def _emit(rec: dict):
     _run["ticks"].append(rec)
 
 
-def _decision_tick(symbol: str) -> dict:
-    """One coordinator decision on latest live 1h candles. PAPER mode only."""
-    from agents.coordinator import Coordinator
+def _decision_tick(engine, symbol: str) -> dict:
+    """One PaperEngine tick on latest live 1h candles: reconcile (mark/close) any
+    OPEN position against the newest completed bar first, then run the frozen
+    decision pipeline and open a paper position if RiskEngine approves a LONG/SHORT
+    and no position for this symbol is already OPEN (duplicate prevention)."""
     candles = fetch_klines(symbol, TF, limit=100)
-    dec = Coordinator().run(symbol=symbol, timeframe=TF, candles=candles)
-    dd = dec.to_dict() if hasattr(dec, "to_dict") else (dec.__dict__ if hasattr(dec, "__dict__") else dec)
+    if len(candles) >= 2:
+        # the last two bars: [newest closed bar, current forming bar]. Feed the
+        # newest CLOSED bar to resolve SL/TP before deciding on the forming bar.
+        closed_bar = candles[-2]
+        engine.update_market({
+            "symbol": symbol, "open": closed_bar["open"], "high": closed_bar["high"],
+            "low": closed_bar["low"], "close": closed_bar["close"],
+            "close_time": closed_bar["close_time"],
+        })
+    res = engine.tick(candles, symbol=symbol, timeframe=TF)
+    dd = res["decision"]
+    dd = dd.to_dict() if hasattr(dd, "to_dict") else (dd.__dict__ if hasattr(dd, "__dict__") else dd)
     dd = dd or {}
-    decision = str(dd.get("decision") or dd.get("signal") or "NO_TRADE").upper()
+    decision = str(res.get("position", {}).get("side") or dd.get("decision") or dd.get("signal") or "NO_TRADE").upper()
+    # reflect skip decision so observability shows it was a signal but not a new entry
+    if decision in ("LONG", "SHORT") and res.get("order_id") is None:
+        decision = f"{decision}_NO_OPEN"
     return {
         "ts": int(time.time()*1000),
         "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "symbol": symbol, "decision": decision,
+        "decision_id": res.get("decision_id"), "order_id": res.get("order_id"),
+        "position_id": res.get("position", {}).get("id") if isinstance(res.get("position"), dict) else None,
         "reason": str(dd.get("reason") or ""),
         "regime": dd.get("regime"), "signal": dd.get("signal"),
         "rr": dd.get("rr"), "risk_pct": dd.get("risk_pct"),
@@ -82,9 +99,13 @@ def main():
     _reset_calls()
     tg._last_sent.clear()
     _run["llm_calls"] = _snapshot_llm_calls()
+    # single long-lived paper engine: in-memory portfolio + DB mirror (SL/TP/TIME_EXIT)
+    from portfolio.paper_engine import PaperEngine
+    engine = PaperEngine(equity=10000)
     print(f"RUNTIME START {_run['start_utc']}", flush=True)
     print(f"STOP AT     {_run['stop_utc']} (UTC) — will not restart after", flush=True)
     print(f"MODE={_run['mode']} MODEL={_run['model']} TF={TF} interval={TICK_INTERVAL_S}s", flush=True)
+    print(f"RESUMED open positions: {len([p for p in engine.portfolio.positions if p.get('status')=='OPEN'])}", flush=True)
     log_event("paper_runtime", "info", f"runtime start mode=PAPER model={_run['model']} stop_utc={_run['stop_utc']}",
               {"start": _run["start_ms"], "stop": STOP_UTC_MS})
 
@@ -99,7 +120,7 @@ def main():
             if now_ms - last_tick_ts >= MIN_UPDATE_INTERVAL_S * 1000:
                 for sym in SYMBOLS:
                     try:
-                        rec = _decision_tick(sym)
+                        rec = _decision_tick(engine, sym)
                         _emit(rec)
                         _run["llm_calls"] = _snapshot_llm_calls()
                         cand = "YES" if rec["decision"] in ("LONG", "SHORT") else "no"

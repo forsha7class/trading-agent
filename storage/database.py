@@ -55,12 +55,49 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         evidence TEXT, counter_evidence TEXT, reason TEXT, decision TEXT, versions TEXT, data_ts INTEGER);
     CREATE TABLE IF NOT EXISTS paper_trades(
         id INTEGER PRIMARY KEY AUTOINCREMENT, decision_id INTEGER REFERENCES decisions(id), symbol TEXT, side TEXT,
-        entry REAL, stop REAL, tp1 REAL, size REAL, status TEXT, pnl REAL, fees REAL, opened_at INTEGER, closed_at INTEGER);
+        entry REAL, stop REAL, tp1 REAL, tp2 REAL, size REAL, status TEXT, pnl REAL, fees REAL, hit TEXT, opened_at INTEGER, closed_at INTEGER);
     CREATE TABLE IF NOT EXISTS system_events(
         id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER, module TEXT, level TEXT, message TEXT, meta TEXT);
     CREATE TABLE IF NOT EXISTS model_versions(
         version TEXT PRIMARY KEY, component TEXT, created_at INTEGER, meta TEXT);
     """)
+    # migration: ensure legacy paper_trades got tp2/hit columns (old schema)
+    try:
+        cols = [r[1] for r in db.execute("PRAGMA table_info(paper_trades)").fetchall()]
+        if cols and "tp2" not in cols:
+            db.execute("ALTER TABLE paper_trades ADD COLUMN tp2 REAL")
+        if cols and "hit" not in cols:
+            db.execute("ALTER TABLE paper_trades ADD COLUMN hit TEXT")
+    except Exception:
+        pass
+    # migration: paper_orders/paper_positions tp2+fields from legacy engine DDL
+    try:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS paper_orders(
+            id TEXT PRIMARY KEY, decision_id INTEGER, symbol TEXT, side TEXT,
+            entry REAL, stop REAL, tp1 REAL, tp2 REAL, size REAL, created_at INTEGER,
+            status TEXT, opened_at INTEGER);
+        CREATE TABLE IF NOT EXISTS paper_positions(
+            id TEXT PRIMARY KEY, order_id TEXT, decision_id INTEGER, symbol TEXT, side TEXT,
+            entry REAL, raw_entry REAL, stop REAL, tp1 REAL, tp2 REAL, size REAL,
+            opened_at INTEGER, entry_bar INTEGER, status TEXT);
+        """)
+        cols = [r[1] for r in db.execute("PRAGMA table_info(paper_positions)").fetchall()]
+        if cols and "decision_id" not in cols:
+            db.execute("ALTER TABLE paper_positions ADD COLUMN decision_id INTEGER")
+        if cols and "raw_entry" not in cols:
+            db.execute("ALTER TABLE paper_positions ADD COLUMN raw_entry REAL")
+        if cols and "tp2" not in cols:
+            db.execute("ALTER TABLE paper_positions ADD COLUMN tp2 REAL")
+        if cols and "entry_bar" not in cols:
+            db.execute("ALTER TABLE paper_positions ADD COLUMN entry_bar INTEGER")
+        cols = [r[1] for r in db.execute("PRAGMA table_info(paper_orders)").fetchall()]
+        if cols and "tp2" not in cols:
+            db.execute("ALTER TABLE paper_orders ADD COLUMN tp2 REAL")
+        if cols and "opened_at" not in cols:
+            db.execute("ALTER TABLE paper_orders ADD COLUMN opened_at INTEGER")
+    except Exception:
+        pass
     return db
 
 def insert_candle(c: dict, timeframe: str="1h") -> None:
@@ -82,10 +119,10 @@ def insert_decision(d: dict) -> int:
 
 def insert_paper_trade(t: dict) -> int:
     db=get_db()
-    cur=db.execute("""INSERT INTO paper_trades(decision_id,symbol,side,entry,stop,tp1,size,status,pnl,fees,opened_at,closed_at)
-        VALUES(:decision_id,:symbol,:side,:entry,:stop,:tp1,:size,:status,:pnl,:fees,:opened_at,:closed_at)""",
-        {"decision_id":t.get("decision_id"),"symbol":t.get("symbol"),"side":t.get("side"),"entry":t.get("entry"),"stop":t.get("stop"),"tp1":t.get("tp1"),
-         "size":t.get("size"),"status":t.get("status","OPEN"),"pnl":t.get("pnl"),"fees":t.get("fees"),"opened_at":t.get("opened_at",int(time.time()*1000)),"closed_at":t.get("closed_at")})
+    cur=db.execute("""INSERT INTO paper_trades(decision_id,symbol,side,entry,stop,tp1,tp2,size,status,pnl,fees,hit,opened_at,closed_at)
+        VALUES(:decision_id,:symbol,:side,:entry,:stop,:tp1,:tp2,:size,:status,:pnl,:fees,:hit,:opened_at,:closed_at)""",
+        {"decision_id":t.get("decision_id"),"symbol":t.get("symbol"),"side":t.get("side"),"entry":t.get("entry"),"stop":t.get("stop"),"tp1":t.get("tp1"),"tp2":t.get("tp2"),
+         "size":t.get("size"),"status":t.get("status","OPEN"),"pnl":t.get("pnl"),"fees":t.get("fees"),"hit":t.get("hit"),"opened_at":t.get("opened_at",int(time.time()*1000)),"closed_at":t.get("closed_at")})
     return int(cur.lastrowid or 0)
 
 def log_event(module: str, level: str, message: str, meta: dict | None=None) -> None:

@@ -53,6 +53,7 @@ class Decision:
     timeframe: str | None = None
     data_ts: int | None = None
     ts: int | None = None  # alias for storage compatibility
+    id: int | None = None  # decisions.id of the persisted row (set by decide())
 
     def __post_init__(self):
         if self.timestamp == 0:
@@ -92,10 +93,21 @@ class DecisionEngine:
 
     def decide(self, ctx: dict) -> Decision:
         try:
-            return self._decide(ctx)
+            d = self._decide(ctx)
         except Exception as e:
             import logging; logging.getLogger(__name__).exception("decision critical")
-            return Decision(symbol=ctx.get("symbol","BTCUSDT"), signal="NO_TRADE", probability=None, regime=ctx.get("regime","UNCERTAIN") if isinstance(ctx.get("regime"), str) else "UNCERTAIN", entry=None, stop=None, tp1=None, tp2=None, risk_pct=None, rr=None, evidence=[], counter_evidence=[], reason=f"SYSTEM_FAILURE:{e}", timestamp=int(time.time()*1000), versions=ctx.get("versions",{}), no_trade_reason="SYSTEM_FAILURE")
+            d = Decision(symbol=ctx.get("symbol","BTCUSDT"), signal="NO_TRADE", probability=None, regime=ctx.get("regime","UNCERTAIN") if isinstance(ctx.get("regime"), str) else "UNCERTAIN", entry=None, stop=None, tp1=None, tp2=None, risk_pct=None, rr=None, evidence=[], counter_evidence=[], reason=f"SYSTEM_FAILURE:{e}", timestamp=int(time.time()*1000), versions=ctx.get("versions",{}), no_trade_reason="SYSTEM_FAILURE")
+        # Authoritative row is persisted by Coordinator.run right after decide()
+        # (append-only table). We tag id here via lookup so callers can link
+        # decisions -> paper orders without double-inserting.
+        try:
+            from storage.database import get_db
+            row = get_db().execute("SELECT id FROM decisions WHERE symbol=? AND ts=? ORDER BY id DESC LIMIT 1",
+                                   (d.symbol, d.ts)).fetchone()
+            d.id = int(row["id"]) if row else None
+        except Exception:
+            d.id = None
+        return d
 
     def _decide(self, ctx: dict) -> Decision:
         ts = int(time.time()*1000)
