@@ -68,7 +68,7 @@ def _decision_tick(engine, symbol: str) -> dict:
     dd = res["decision"]
     dd = dd.to_dict() if hasattr(dd, "to_dict") else (dd.__dict__ if hasattr(dd, "__dict__") else dd)
     dd = dd or {}
-    decision = str(res.get("position", {}).get("side") or dd.get("decision") or dd.get("signal") or "NO_TRADE").upper()
+    decision = str((res.get("position") or {}).get("side") or dd.get("decision") or dd.get("signal") or "NO_TRADE").upper()
     # reflect skip decision so observability shows it was a signal but not a new entry
     if decision in ("LONG", "SHORT") and res.get("order_id") is None:
         decision = f"{decision}_NO_OPEN"

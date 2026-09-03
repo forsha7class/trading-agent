@@ -91,8 +91,13 @@ class PaperPortfolio:
         low=float(candle.get("low",candle.get("l") or 0))
         close=float(candle.get("close",candle.get("c") or high))
         bar_ts=candle.get("close_time",int(time.time()*1000))
+        sym=candle.get("symbol")
+        # multi-symbol safety: a candle may only resolve positions of ITS symbol,
+        # else a BTC position is SL/TP-triggered by an ETH candle (wrong prices)
         self._bar_count += 1
         for p in list(self.positions):
+            if sym and p.get("symbol") and p["symbol"] != sym:
+                continue
             hit_exit=self._resolve_exit(p, high, low, close, bar_ts)
             if not hit_exit: continue
             hit,exit_price=hit_exit
