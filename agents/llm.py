@@ -1,7 +1,13 @@
 """Bounded LLM JSON layer — optional. Never invents market data, never overrides risk. Stub if no key."""
 from __future__ import annotations
-import os, json, httpx
+import os, json, time, httpx
 PROMPT_VERSION="0.1.0"
+
+# Observability accumulator (dry-run/cost reporting). Does NOT change the return
+# schema. Records raw provider usage/credit per call; never stores secrets.
+CALLS: list[dict] = []
+def _reset_calls():
+    CALLS.clear()
 # Forbid invented facts: prompt forces structured JSON only from provided evidence
 SYSTEM_PROMPT="""You are a bounded trading analyst+signal reviewer for a decision-support system. Rules:
 - Available evidence is ONLY what the quantitative system supplies in the user message JSON.
@@ -84,6 +90,15 @@ def llm_review(payload:dict, model:str|None=None, base_url:str|None=None, api_ke
         # assessment must be one of VALID/WEAK/INVALID (default WEAK-safe)
         if str(data.get("assessment","")).upper() not in ("VALID","WEAK","INVALID"):
             data["assessment"]="WEAK"
+        # record raw provider metadata (usage + credit) — never secrets
+        CALLS.append({
+            "ok": True,
+            "usage": (_resp.get("usage") or {}),
+            "credit": _resp.get("customer_credits"),
+            "model": _resp.get("model") or model,
+            "ts": int(time.time()*1000),
+        })
         return data
     except Exception:
+        CALLS.append({"ok": False, "usage": {}, "credit": None, "ts": int(time.time()*1000)})
         return None
