@@ -108,33 +108,52 @@ def run_review(ctx: dict, decision=None, use_llm: bool = False) -> dict:
         invalidations.append("risk_reviewer: rejected")
         risk_flags.append("risk reviewer rejected")
 
-    # ---- LLM reviewer (optional) — advisory, never authority ----
+    # ---- LLM reviewer (DeepSeek via 9Router, when enabled) — advisory ----
     if use_llm:
         try:
             from agents.llm import llm_review
             llm = llm_review({
-                "direction": direction,
-                "ensemble": ctx.get("ensemble", {}),
-                "probability": ctx.get("probability", {}),
+                "symbol": ctx.get("symbol"),
+                "timeframe": ctx.get("timeframe"),
                 "regime": _regime_label(ctx.get("regime")),
+                "direction": direction,
+                "ensemble_score": (ctx.get("ensemble", {}) or {}).get("score"),
+                "p_up": (ctx.get("probability", {}) or {}).get("p_up"),
+                "p_down": (ctx.get("probability", {}) or {}).get("p_down"),
+                "risk_pct": (ctx.get("probability", {}) or {}).get("risk_pct"),
+                "rr": risk_advisory.get("rr"),
                 "analyst_facts": evidence,
-                "signal_review": sig_out,
-                "risk_review": risk_advisory,
+                "signal_reviewer_flags": sig_flags,
+                "risk_approved": risk_advisory.get("approved"),
             })
         except Exception:
             llm = None
         if llm is None:
-            risk_flags.append("llm_reviewer: UNAVAILABLE (no key / call failed)")
-            # do not silently approve; keep status as-is but annotate unavailability
-            risk_flags.append("llm_review UNAVAILABLE")
+            # Provider/LLM unavailable or malformed -> UNAVAILABLE, never silent PASS.
+            # A hard risk veto above still forces REJECT regardless.
+            risk_flags.append("llm UNAVAILABLE (no key / provider / malformed)")
+            if status != "REJECT":
+                status = "UNAVAILABLE"
         else:
-            evidence.append("llm: " + str(llm.get("assessment", "")))
+            # LLM assessment feeds evidence; decision coherence is advisory only.
+            evidence.append(f"llm assessment={llm.get('assessment')} decision={llm.get('decision')}")
             for ce in (llm.get("counter_evidence") or []):
                 if ce not in counter_evidence:
                     counter_evidence.append(ce)
             for rf in (llm.get("risk_flags") or []):
                 if rf not in risk_flags:
                     risk_flags.append(rf)
+            for u in (llm.get("uncertainties") or []):
+                if u not in uncertainties:
+                    uncertainties.append(u)
+            # LLM must never flip a REJECT (risk) to approval; it is advisory.
+            if status != "REJECT" and llm.get("decision") not in ("LONG", "SHORT") and \
+                    str(llm.get("decision", "")).upper() != direction.upper():
+                # LLM diverges from proposed direction -> FLAG (human review)
+                if status == "PASS":
+                    status = "FLAG"
+                invalidations.append(f"llm diverges: proposed {direction}, llm {llm.get('decision')}")
+                risk_flags.append("llm disagrees with quant direction")
 
     if isinstance(analyst_out, dict) and analyst_out.get("facts") is False:
         status = "UNAVAILABLE"

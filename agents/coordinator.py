@@ -102,11 +102,12 @@ class Coordinator:
             from agents.ai_contract import run_review
             ai_review = run_review(
                 {**ctx,
+                 "symbol": symbol, "timeframe": timeframe,
                  "features": feats, "regime": regime_dict,
                  "ensemble": ens_dict, "probability": prob_dict,
                  "mtf": mtf_dict,
                  "proposed_direction": ens_dict.get("direction", "NO_TRADE")},
-                decision=dec, use_llm=False)
+                decision=dec, use_llm=True)
         except Exception:
             ai_review = {}
 
@@ -126,4 +127,76 @@ class Coordinator:
             # failure to persist still returns decision but logs
             pass
 
+        # 13. Telegram notification — OBSERVABILITY ONLY, never part of decision.
+        # Runs after the authoritative decision; failures are logged, not raised,
+        # so the pipeline is never affected by a notification problem.
+        try:
+            _notify_decision(symbol, timeframe, dec, ai_review)
+        except Exception:
+            # notification must never crash the quant pipeline
+            pass
+
         return dec
+
+
+def _notify_decision(symbol: str, timeframe: str, dec, ai_review: dict) -> None:
+    """Translate a coordinator decision into a bounded Telegram notification.
+
+    Pure observability. Reuses decision fields already computed; never calls into
+    strategies, risk, or AI agents (kept out of those modules by construction).
+    """
+    from agents import telegram_notifier as tg
+    from storage.database import log_event
+    dd = dec.to_dict() if hasattr(dec, "to_dict") else (dec.__dict__ if hasattr(dec, "__dict__") else dec)
+    dd = dd or {}
+    decision = str(dd.get("decision") or dd.get("signal") or "NO_TRADE").upper()
+    reason = str(dd.get("reason") or "")
+    base = {
+        "symbol": symbol, "timeframe": timeframe,
+        "decision": decision, "direction": decision,
+        "regime": dd.get("regime") or "?",
+        "entry": dd.get("entry"), "stop": dd.get("stop"),
+        "tp1": dd.get("tp1"), "tp2": dd.get("tp2"),
+        "rr": dd.get("rr"), "risk_pct": dd.get("risk_pct"),
+        "p_up": (dd.get("probability") or {}).get("p_up") if isinstance(dd.get("probability"), dict) else None,
+        "p_down": (dd.get("probability") or {}).get("p_down") if isinstance(dd.get("probability"), dict) else None,
+        "decision_id": dd.get("id") or dd.get("ts"),
+        "ts": dd.get("ts") or dd.get("timestamp"),
+        "ai_status": (ai_review or {}).get("status", "UNAVAILABLE"),
+        "evidence": (ai_review or {}).get("evidence", []),
+        "counter_evidence": (ai_review or {}).get("counter_evidence", []),
+        "risk_flags": (ai_review or {}).get("risk_flags", []),
+        "invalidations": (ai_review or {}).get("invalidations", []),
+    }
+    ai_status = (ai_review or {}).get("status", "UNAVAILABLE")
+    risk_veto_markers = ("RISK_REJECT", "RR_INSUFFICIENT", "RISK_BUDGET_EXHAUSTED",
+                         "NO_", "LIQUIDITY", "VOLATILITY", "POSITION_LIMIT", "veto")
+
+    result = None
+    if decision in ("LONG", "SHORT"):
+        # approved trade signal (paper mode) — include AI status
+        base["mode"] = "PAPER"
+        result = tg.notify(tg.EVENT_SIGNAL, base)
+    elif ai_status == "FLAG":
+        base["reasons"] = (ai_review or {}).get("risk_flags", []) or \
+                          (ai_review or {}).get("uncertainties", [])
+        result = tg.notify(tg.EVENT_AI_FLAG, base)
+    elif ai_status == "REJECT" and not any(m in reason.upper() for m in risk_veto_markers):
+        base["reason"] = reason or "AI review rejected"
+        result = tg.notify(tg.EVENT_AI_REJECT, base)
+    elif "NO_TRADE" in decision or any(m in reason.upper() for m in risk_veto_markers):
+        # only notify if a risk veto (not routine no-signal)
+        if any(m in reason.upper() for m in ("RISK_REJECT", "RR_INS", "VETO", "RISK_BUDGET", "NO_ILLIQUID", "NO_EXCESS", "NO_MARTINGALE", "NO_AVERAGING", "NO_RISK_OVERRIDE", "NO_INVALID_RR", "POSITION_LIMIT", "VOLATILITY", "LIQUIDITY")):
+            base["reason"] = reason
+            base["risk_engine"] = "REJECT"
+            result = tg.notify(tg.EVENT_RISK_REJECT, base)
+
+    if result:
+        try:
+            log_event("telegram", "debug",
+                      f"notify {result.get('sent') and 'sent' or (result.get('deduped') and 'deduped' or 'skipped')} {decision}",
+                      {"symbol": symbol, "sent": result.get("sent"),
+                       "deduped": result.get("deduped"),
+                       "error": tg.redact_secret(str(result.get("error") or ""))})
+        except Exception:
+            pass
