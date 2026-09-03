@@ -97,9 +97,13 @@ class Coordinator:
         # authoritative quant decision. Advisory only — never changes `dec`,
         # never overrides the hard RiskEngine veto already applied inside
         # DecisionEngine, and cannot raise any risk limit.
+        # Token efficiency: DeepSeek is invoked ONLY for an eligible LONG/SHORT
+        # candidate. An ordinary NO_TRADE is reviewed deterministically (no LLM),
+        # so routine no-trade decisions cause ZERO LLM calls.
         ai_review = {}
         try:
             from agents.ai_contract import run_review
+            _eligible = str(dec.get("decision") or dec.get("signal") or "").upper() in ("LONG", "SHORT")
             ai_review = run_review(
                 {**ctx,
                  "symbol": symbol, "timeframe": timeframe,
@@ -107,7 +111,7 @@ class Coordinator:
                  "ensemble": ens_dict, "probability": prob_dict,
                  "mtf": mtf_dict,
                  "proposed_direction": ens_dict.get("direction", "NO_TRADE")},
-                decision=dec, use_llm=True)
+                decision=dec, use_llm=_eligible)
         except Exception:
             ai_review = {}
 
