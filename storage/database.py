@@ -98,6 +98,59 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
             db.execute("ALTER TABLE paper_orders ADD COLUMN opened_at INTEGER")
     except Exception:
         pass
+    # demo lifecycle schema (task §10). One row per entity; lifecycle dedup by
+    # decision_id via UNIQUE(decision_id) + event UNIQUE constraints.
+    try:
+        db.executescript("""
+        CREATE TABLE IF NOT EXISTS demo_orders(
+            id TEXT PRIMARY KEY,
+            decision_id INTEGER UNIQUE,
+            signal_id TEXT,
+            symbol TEXT, side TEXT,
+            requested_qty REAL, executed_qty REAL DEFAULT 0,
+            requested_price REAL, executed_price REAL,
+            stop REAL, tp1 REAL, tp2 REAL,
+            status TEXT,              -- NEW/OPEN/PARTIALLY_FILLED/FILLED/CANCELED/REJECTED/CLOSED
+            strategy_id TEXT, strategy_version TEXT,
+            regime TEXT, risk_engine TEXT, ai_status TEXT,
+            environment TEXT DEFAULT 'DEMO',
+            created_at INTEGER, opened_at INTEGER, closed_at INTEGER,
+            reject_reason TEXT);
+        CREATE TABLE IF NOT EXISTS demo_positions(
+            id TEXT PRIMARY KEY,
+            order_id TEXT,
+            decision_id INTEGER UNIQUE,
+            symbol TEXT, side TEXT,
+            entry REAL, stop REAL, tp1 REAL, tp2 REAL,
+            size REAL, open_qty REAL,
+            status TEXT,              -- OPEN/CLOSED
+            opened_at INTEGER, closed_at INTEGER,
+            environment TEXT DEFAULT 'DEMO');
+        CREATE TABLE IF NOT EXISTS demo_trades(
+            id TEXT PRIMARY KEY,
+            position_id TEXT,
+            order_id TEXT,
+            decision_id INTEGER UNIQUE,
+            symbol TEXT, side TEXT,
+            entry REAL, exit_price REAL,
+            size REAL, qty REAL,
+            pnl REAL, fees REAL,
+            exit_reason TEXT,         -- TAKE_PROFIT_1 / STOP_LOSS / TIME_EXIT / MANUAL_CLOSE
+            mae REAL, mfe REAL,
+            opened_at INTEGER, closed_at INTEGER,
+            environment TEXT DEFAULT 'DEMO');
+        CREATE TABLE IF NOT EXISTS demo_events(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            decision_id INTEGER,
+            event_type TEXT,          -- SIGNAL/FILL/TP1/TP2/SL/TIME_EXIT/REJECT/CLOSE
+            ts INTEGER,
+            telegram_sent INTEGER DEFAULT 0,
+            telegram_error TEXT,
+            meta TEXT,
+            UNIQUE(decision_id, event_type));
+        """)
+    except Exception:
+        pass
     return db
 
 def insert_candle(c: dict, timeframe: str="1h") -> None:

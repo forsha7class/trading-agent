@@ -20,9 +20,19 @@ EVENT_AI_REJECT = "AI_REJECT"
 EVENT_RISK_REJECT = "RISK_REJECT"
 EVENT_SYSTEM_ALERT = "SYSTEM_ALERT"
 EVENT_PAPER_RESULT = "PAPER_RESULT"
+# DEMO lifecycle events (task §19/§14) — trader-facing, one per (decision,event)
+EVENT_DEMO_SIGNAL = "DEMO_SIGNAL"
+EVENT_DEMO_FILLED = "DEMO_FILLED"
+EVENT_DEMO_TP1 = "DEMO_TP1"
+EVENT_DEMO_TP2 = "DEMO_TP2"
+EVENT_DEMO_SL = "DEMO_SL"
+EVENT_DEMO_TIME = "DEMO_TIME"
+EVENT_DEMO_REJECT = "DEMO_REJECT"
 
 _EVENT_TYPES = (EVENT_SIGNAL, EVENT_AI_FLAG, EVENT_AI_REJECT,
-                EVENT_RISK_REJECT, EVENT_SYSTEM_ALERT, EVENT_PAPER_RESULT)
+                EVENT_RISK_REJECT, EVENT_SYSTEM_ALERT, EVENT_PAPER_RESULT,
+                EVENT_DEMO_SIGNAL, EVENT_DEMO_FILLED, EVENT_DEMO_TP1, EVENT_DEMO_TP2,
+                EVENT_DEMO_SL, EVENT_DEMO_TIME, EVENT_DEMO_REJECT)
 
 # in-memory dedup: key -> last-sent monotonic timestamp (bounded)
 _lock = threading.Lock()
@@ -98,6 +108,131 @@ def _fmt_probability(p_up):
         return f"{float(p_up)*100:.0f}%"
     except Exception:
         return "n/a"
+
+
+# ---- trader-facing number/format helpers (presentation only, task §15-§18) --
+
+def _price(x, nd: int = 2) -> str:
+    """80943.321234 -> '80,943.32' (thousands separator, 2dp)."""
+    try:
+        f = float(x)
+        s = f"{f:,.{nd}f}"
+        return s
+    except Exception:
+        return "n/a"
+
+
+def _pct(x, nd: int = 0) -> str:
+    """0.70 -> '70%' ; 0.005 -> '0.5%'."""
+    try:
+        return f"{float(x) * 100:.{nd}f}%"
+    except Exception:
+        return "n/a"
+
+
+def _rr_str(rr) -> str:
+    """1.500000000000008 -> '1:1.50'."""
+    try:
+        return f"1:{float(rr):.2f}"
+    except Exception:
+        return "n/a"
+
+
+def _signed(v, nd: int = 2) -> str:
+    try:
+        return f"{float(v):+,.{nd}f}"
+    except Exception:
+        return "n/a"
+
+
+def _regime_readable(regime: str | None) -> str:
+    m = {"TREND_BULL": "Trend Bullish", "TREND_BEAR": "Trend Bearish",
+         "LOW_VOL": "Low Volatility", "HIGH_VOL": "High Volatility",
+         "HIGH_VOLATILITY": "High Volatility", "RANGE": "Range",
+         "UNCERTAIN": "Uncertain"}
+    return m.get((regime or "").upper(), str(regime or "?"))
+
+
+def _ai_line(status: str | None) -> str:
+    s = (status or "UNAVAILABLE").upper()
+    m = {"PASS": "\U0001F9E0 AI PASS", "FLAG": "\u26A0\uFE0F AI FLAG",
+         "REJECT": "\U0001F6D1 AI REJECT", "UNAVAILABLE": "\u26AA AI UNAVAILABLE"}
+    return m.get(s, f"AI {status}")
+
+
+def _demo_exit_title(ev: dict) -> tuple[str, str]:
+    hit = str(ev.get("exit_reason") or "").upper()
+    sym = (ev.get("symbol") or "?").upper()
+    if hit == "TAKE_PROFIT_1":
+        return "\u2705", f"{sym} — TP1 HIT"
+    if hit == "TAKE_PROFIT_2":
+        return "\U0001F3AF", f"{sym} — TP2 HIT"
+    if hit == "STOP_LOSS":
+        return "\U0001F6D1", f"{sym} — STOP LOSS"
+    if hit == "TIME_EXIT":
+        return "\u23F1\uFE0F", f"{sym} — TIME EXIT"
+    return "\U0001F4C8", f"{sym} — EXIT"
+
+
+# ---- trader-facing DEMO formatters ----------------------------------------
+def format_demo_filled(ev: dict) -> str:
+    sym = (ev.get("symbol") or "?").upper()
+    side = str(ev.get("side") or ev.get("decision") or "?").upper()
+    tf = ev.get("timeframe") or "1H"
+    regime = _regime_readable(ev.get("regime"))
+    entry = _price(ev.get("entry"))
+    stop = _price(ev.get("stop"))
+    tp1 = _price(ev.get("tp1"))
+    tp2 = _price(ev.get("tp2"))
+    qty = ev.get("quantity")
+    qty_s = f"{float(qty):.6f}".rstrip("0").rstrip(".") if qty is not None else "n/a"
+    ai = _ai_line(ev.get("ai_status"))
+    return (f"\U0001F7E6 {sym} — DEMO {side}\n"
+            f"\U0001F4CA {tf} · {regime}\n"
+            f"\U0001F4B0 Entry   {entry}\n"
+            f"\U0001F6D1 SL      {stop}\n"
+            f"\U0001F3AF TP1     {tp1}\n"
+            f"\U0001F3AF TP2     {tp2}\n"
+            f"{ai}\n"
+            f"Order:\n{ev.get('order_id') or '?'}\n"
+            f"Status:\nOPEN\n"
+            f"Size: {qty_s}\n"
+            f"BINANCE DEMO")
+
+
+def format_demo_exit(ev: dict) -> str:
+    icon, title = _demo_exit_title(ev)
+    side = str(ev.get("side") or "?").upper()
+    entry = _price(ev.get("entry"))
+    exit_px = _price(ev.get("exit"))
+    pnl = ev.get("pnl")
+    rr = ev.get("rr")
+    lines = [f"{icon} {title}", side, "", f"Entry: {entry}", f"Exit: {exit_px}"]
+    if rr is not None:
+        try:
+            lines += ["", f"Result:", f"{_signed(float(rr))}R"]
+        except Exception:
+            pass
+    if pnl is not None:
+        lines += ["", "PnL:", _signed(pnl)]
+    if str(ev.get("exit_reason") or "").upper() == "TIME_EXIT":
+        lines += ["", f"Holding:", f"{ev.get('holding_bars')} bars"]
+    lines += ["", "Exit:", str(ev.get("exit_reason") or "?"), "", "BINANCE DEMO"]
+    return "\n".join(lines)
+
+
+def format_demo_reject(ev: dict) -> str:
+    sym = (ev.get("symbol") or "?").upper()
+    reason = ev.get("reason") or ev.get("invalidations") or ""
+    if isinstance(reason, list):
+        reason = " • ".join(str(x) for x in reason)
+    regime = _regime_readable(ev.get("regime"))
+    ai = _ai_line(ev.get("ai_status") or "SKIPPED")
+    return (f"\U0001F6D1 {sym} — NO TRADE\n"
+            f"Reason:\n{reason}\n"
+            f"Regime:\n{regime}\n"
+            f"{ai}\n"
+            f"Status:\nNo order placed.")
 
 
 def format_signal(ev: dict) -> str:
@@ -184,6 +319,14 @@ def _format(event_type: str, ev: dict) -> str:
         return format_system(ev)
     if event_type == EVENT_PAPER_RESULT:
         return format_paper(ev)
+    if event_type == EVENT_DEMO_FILLED:
+        return format_demo_filled(ev)
+    if event_type in (EVENT_DEMO_TP1, EVENT_DEMO_TP2, EVENT_DEMO_SL, EVENT_DEMO_TIME):
+        return format_demo_exit(ev)
+    if event_type == EVENT_DEMO_REJECT:
+        return format_demo_reject(ev)
+    if event_type == EVENT_DEMO_SIGNAL:
+        return format_signal(ev)
     return "unknown event"
 
 

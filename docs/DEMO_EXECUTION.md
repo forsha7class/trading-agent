@@ -1,71 +1,104 @@
-# DEMO Execution — Status & Scope (2026-09)
+# DEMO Execution — Adapter + Lifecycle (2026-09, coding slice)
 
-Task: "Clean Telegram alerts + DEMO execution adapter" (additive, NO Phase 6).
+Additive. NO Phase 6. PAPER path byte-for-byte unchanged. Strategy frozen at
+RegimeGatedTrend 0.1.0. RiskEngine authoritative. AI review-only.
+**Zero external orders were placed building this slice** (all exchange paths
+tested against an in-memory FakeBroker; real broker never invoked).
 
-## Delivered (this slice)
+## Files changed (slice)
 
-DEMO execution is **source-gated and signal-ready, but not order-capable.**
-Two additive modules + tests, PAPER path untouched:
+| file | what |
+|---|---|
+| `execution/env.py` | TRADING_MODE gate. PAPER/DEMO/LIVE; LIVE → disabled; DEMO requires mode=DEMO + creds + endpoint == `https://testnet.binance.vision` (mainnet refused). Never silent fallback. |
+| `execution/adapters.py` | `ExecutionAdapter` base (place/get_status/cancel/get_position/close/reconcile). `PaperExecution` (wraps untouched PaperEngine), `DemoExecution` (spot testnet), `LiveExecution` (interface-only → `LIVE_EXECUTION_DISABLED`, no order impl). |
+| `execution/demo_broker.py` | Binance Spot Testnet signed REST (HMAC-SHA256, X-MBX-APIKEY). Base hard-coded testnet; refuses any other base. Secrets from env, never logged/printed/persisted. No mainnet route. |
+| `execution/fake_broker.py` | Deterministic in-memory broker (validate/market_buy/market_sell/order_status) — tests only. |
+| `execution/demo_engine.py` | DEMO lifecycle orchestrator. |
+| `storage/database.py` | + demo schema (migration block, existing tables untouched). |
+| `storage/demo_store.py` | demo_orders/positions/trades/events persistence helpers. |
+| `agents/telegram_notifier.py` | + trader-facing demo events/formatters (additive; old formatters intact). |
+| `tests/test_demo_execution.py` | 28 tests, ALL PASS. |
+| `docs/DEMO_EXECUTION.md` | this file + scope report. |
 
-- `execution/eligibility.py` — source-of-truth demo eligibility gate (fail-closed).
-  Frozen candidate only: `strategy_id=trend_gated`, `strategy_version=0.1.0`,
-  regime ∈ {TREND_BULL, TREND_BEAR}, decision LONG/SHORT, RiskEngine APPROVED.
-  Legacy 4-strategy ensemble signals (Coordinator path) → always rejected
-  (WRONG_STRATEGY), even in a trending regime. AI is never consulted for approval.
-  Tests: `tests/test_demo_eligibility.py` (11, ALL PASS).
-- `execution/demo_signal.py` — isolated DEMO signal source feeding the frozen
-  `RegimeGatedTrend` through the unchanged deterministic pipeline
-  (validate → features → regime → gate → DecisionEngine/RiskEngine → bounded AI
-  → eligibility). In-memory candidate dict; no orders, no demo DB, no Telegram.
-  `LOW_VOL/RANGE/HIGH_VOL/UNCERTAIN` → NEUTRAL at source → never reach risk.
-  Tests: `tests/test_demo_signal.py` (9, ALL PASS).
+## DB schema (new, prod DB migrated, all rows 0)
 
-Traceable chain per candidate: `signal_id → strategy/version → regime → decision
-→ risk_engine → ai_status → eligibility{eligible, reason}`
-(`execution/demo_signal.py::traceable_chain`).
+```
+demo_orders(id PK, decision_id UNIQUE, signal_id, symbol, side, requested_qty,
+            executed_qty, requested_price, executed_price, stop, tp1, tp2, status,
+            strategy_id, strategy_version, regime, risk_engine, ai_status,
+            environment='DEMO', created_at, opened_at, closed_at, reject_reason)
+demo_positions(id PK, order_id, decision_id UNIQUE, symbol, side, entry, stop,
+               tp1, tp2, size, open_qty, status, opened_at, closed_at, environment)
+demo_trades(id PK, position_id, order_id, decision_id UNIQUE, symbol, side, entry,
+            exit_price, size, qty, pnl, fees, exit_reason, mae, mfe,
+            opened_at, closed_at, environment)
+demo_events(id PK AUTOINCREMENT, decision_id, event_type, ts, telegram_sent,
+            telegram_error, meta, UNIQUE(decision_id, event_type))
+```
+UNIQUE(decision_id) on order/position/trade ⇒ one lifecycle chain per decision.
+UNIQUE(decision_id,event_type) on events ⇒ one event → one Telegram message.
 
-## NOT built (explicit stop)
+## Lifecycle behavior
 
-Full demo lifecycle was **not implemented** and no demo order exists. Decision
-taken with the user after inspection:
+Open gate (before any order): eligibility (frozen source + RiskEngine inside,
+AI never consulted for approval) → spot LONG-only (SHORT rejected) → valid
+qty/price → duplicate order (decision_id) → duplicate OPEN position per symbol →
+capacity (max_positions) → broker symbol/qty validation. Any failure ⇒ REJECTED,
+no order persisted (except dup-attempts, which never re-open).
 
-1. **No Binance DEMO credentials exist in this environment** — checked
-   `~/.hermes/.env`, `/etc/9router.env`, process env, and disk: zero Binance
-   key/secret/testnet endpoint. The task's §4 ("dedicated DEMO credentials
-   already configured") is not true here. Per §5 safety gate (creds present +
-   endpoint confirmed demo + not mainnet) execution **must** remain NO ORDER
-   until real demo creds are supplied by the user. Nothing was guessed or
-   auto-corrected.
-2. Real Binance DEMO smoke test (§23) therefore impossible. User chose to stop
-   at the gate+signal slice rather than build an internal simulated broker.
+Fill: broker response reconciled — request success ≠ fill. FILLED/
+PARTIALLY_FILLED with executed_qty>0 ⇒ position OPEN with ACTUAL qty/avg price;
+REJECTED/CANCELED/UNKNOWN ⇒ no position, order row marked, safe state.
 
-Not built: ExecutionAdapter abstraction, DemoExecution/LiveExecution, demo DB
-schema (demo_orders/positions/trades), order lifecycle/persistence, TP1/TP2/
-SL/TIME_EXIT handling, Telegram redesign (trader-friendly formats, dedup by
-decision_id+event_type), docs/TELEGRAM_SIGNAL_FORMAT.md.
+Exit (per candle, symbol-filtered, deterministic):
+- **SL checked first**; SL wins if the same bar touches SL and TP1 (frozen rule).
+- **TP1 = FULL exit** (user-confirmed; TP2 stored, never resolved — matches the
+  frozen paper semantics; no partial scale-out).
+- **TIME_EXIT** after max_hold_bars (20) 1h bars at bar close.
+Close sells back via broker; persists CLOSED position/order + exactly one
+demo_trade (pnl/fees/exit_reason) + one demo_events row.
 
-## Semantics decisions (user-confirmed)
+Restart: `reconcile_open()` rebuilds OPEN demo positions from DB (no loss, no dup).
 
-- TP1/TP2: keep existing frozen deterministic semantics — **TP1 = full exit**,
-  TP2 stored but never resolved. No partial scale-out. (Only relevant once a
-  demo lifecycle exists.)
+## Telegram (trader-facing, plain text)
 
-## Environment gates (fail-closed, all still enforced)
+Events: DEMO_FILLED (🟦 OPEN — only after confirmed fill; PENDING otherwise),
+DEMO_TP1 ✅ / DEMO_TP2 🎯 / DEMO_SL 🛑 / DEMO_TIME ⏱️ / DEMO_REJECT 🛑 NO TRADE.
+Number presentation: `_price` 80943.32→`80,943.32`; `_rr_str` → `1:1.50`;
+`_pct` 0.005→`0.50%`. Regimes readable (TREND_BULL→Trend Bullish …). AI status
+line: PASS 🧠 / FLAG ⚠️ / REJECT 🛑 / UNAVAILABLE ⚪ (never called PASS).
+Dedup by decision_id+event_type (DB) AND notifier cooldown (in-memory). Send
+requires TRADING_TG_SEND=1; failure logged, never crashes execution.
 
-- `TRADING_MODE` is not read anywhere yet (no execution code exists).
-  When execution is added it must be PAPER|DEMO only; LIVE → disabled;
-  never silent fallback.
-- Telegram remains observability-only: `TRADING_TG_SEND=1` required to send.
-- Secrets policy unchanged: no keys in repo/logs/DB/LLM/Telegram.
+## DEMO execution readiness
 
-## Regression (baseline at slice end)
+- Full lifecycle + safety logic built and test-covered (28 tests).
+- Real order path exists ONLY via `DemoEngine` + `DemoBroker`, which refuses
+  unless: `TRADING_MODE=DEMO`, creds present, endpoint == testnet base.
+- `TRADING_MODE` is NOT set to DEMO anywhere in the runtime env; no runtime
+  wires DEMO execution. Nothing auto-places an order on import/startup.
 
-`/usr/bin/python3.14 tests/test_*.py`: test_all, test_leakage, test_risk_scenarios,
-test_phase2, test_phase3, test_phase4, test_ai_telegram, test_paper_runtime,
-test_demo_eligibility, test_demo_signal — ALL PASS. `/health` = 200.
+## Conditions still required before the FIRST real DEMO order (smoke test)
 
-## Disable / revert
+1. Explicit user authorization for the smoke test (separate step).
+2. Endpoint re-verified == `https://testnet.binance.vision`.
+3. Credentials confirmed demo/testnet (they are: Binance Spot Testnet, verified
+   HTTP 200 on `/api/v3/account`, balances present).
+4. A frozen RegimeGatedTrend candidate appears with regime ∈ {TREND_BULL,
+   TREND_BEAR} (live 1h BTCUSDT — currently LOW_VOL ⇒ NEUTRAL, will not fire),
+5. RiskEngine APPROVED and `execution/eligibility` returns ELIGIBLE.
+6. Symbol/quantity valid (broker `validate`), order minimal, spot LONG only.
+7. No mainnet route exists (verified: env gate + broker refuse).
 
-Nothing was added to any live path; removing `execution/` + the two test files
-fully reverts this slice. PAPER runtime, dashboard, Telegram, and decision
-pipeline are byte-for-byte unchanged.
+## Verification (this slice)
+
+`/usr/bin/python3.14 tests/test_*.py` — all 11 suites PASS (incl. new
+test_demo_execution 28 tests). `/health` 200. Prod `storage/trading.db`: demo
+tables exist, 0 rows; decisions 1299 unchanged. No secrets in repo
+(env-only). No real order was placed.
+
+## Revert
+
+Remove `execution/{env,adapters,demo_broker,fake_broker,demo_engine}.py`,
+`storage/demo_store.py`, revert `storage/database.py` demo migration + the
+telegram_notifier additive block, delete `tests/test_demo_execution.py`.
