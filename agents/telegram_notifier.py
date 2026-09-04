@@ -28,11 +28,13 @@ EVENT_DEMO_TP2 = "DEMO_TP2"
 EVENT_DEMO_SL = "DEMO_SL"
 EVENT_DEMO_TIME = "DEMO_TIME"
 EVENT_DEMO_REJECT = "DEMO_REJECT"
+EVENT_DEMO_CANDIDATE = "DEMO_CANDIDATE"
 
 _EVENT_TYPES = (EVENT_SIGNAL, EVENT_AI_FLAG, EVENT_AI_REJECT,
                 EVENT_RISK_REJECT, EVENT_SYSTEM_ALERT, EVENT_PAPER_RESULT,
                 EVENT_DEMO_SIGNAL, EVENT_DEMO_FILLED, EVENT_DEMO_TP1, EVENT_DEMO_TP2,
-                EVENT_DEMO_SL, EVENT_DEMO_TIME, EVENT_DEMO_REJECT)
+                EVENT_DEMO_SL, EVENT_DEMO_TIME, EVENT_DEMO_REJECT,
+                EVENT_DEMO_CANDIDATE)
 
 # in-memory dedup: key -> last-sent monotonic timestamp (bounded)
 _lock = threading.Lock()
@@ -235,6 +237,35 @@ def format_demo_reject(ev: dict) -> str:
             f"Status:\nNo order placed.")
 
 
+def format_demo_candidate(ev: dict) -> str:
+    sym = (ev.get("symbol") or "?").upper()
+    side = str(ev.get("decision") or ev.get("side") or "?").upper()
+    regime = _regime_readable(ev.get("regime"))
+    entry = _price(ev.get("entry"))
+    stop = _price(ev.get("stop"))
+    tp1 = _price(ev.get("tp1"))
+    tp2 = _price(ev.get("tp2"))
+    ai = _ai_line(ev.get("ai_status"))
+    tf = ev.get("timeframe") or "1H"
+    lines = [
+        "\U0001F7E2 FROZEN DEMO CANDIDATE",
+        "READY FOR DEMO SMOKE TEST",
+        "",
+        f"{sym} — {side}",
+        f"\U0001F4CA {tf} · {regime}",
+        "",
+        f"\U0001F4B0 Entry   {entry}",
+        f"\U0001F6D1 SL      {stop}",
+        f"\U0001F3AF TP1     {tp1}",
+        f"\U0001F3AF TP2     {tp2}",
+        "",
+        ai,
+        "",
+        f"ID {ev.get('signal_id') or ev.get('decision_id') or ''}",
+    ]
+    return "\n".join(lines)
+
+
 def format_signal(ev: dict) -> str:
     s = (ev.get("symbol") or "?").upper()
     d = (ev.get("decision") or ev.get("direction") or "?").upper()
@@ -325,6 +356,8 @@ def _format(event_type: str, ev: dict) -> str:
         return format_demo_exit(ev)
     if event_type == EVENT_DEMO_REJECT:
         return format_demo_reject(ev)
+    if event_type == EVENT_DEMO_CANDIDATE:
+        return format_demo_candidate(ev)
     if event_type == EVENT_DEMO_SIGNAL:
         return format_signal(ev)
     return "unknown event"
