@@ -151,6 +151,34 @@ def init_db(path: str | None = None) -> sqlite3.Connection:
         """)
     except Exception:
         pass
+    # migration: futures demo columns (additive; existing spot rows unaffected).
+    # environment records the market kind: DEMO (spot) vs DEMO_FUTURES.
+    try:
+        cols = {r[1] for r in db.execute("PRAGMA table_info(demo_positions)").fetchall()}
+        if cols and "leverage" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN leverage REAL DEFAULT 1")
+        if cols and "margin" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN margin REAL")
+        if cols and "notional" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN notional REAL")
+        if cols and "liquidation_price" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN liquidation_price REAL")
+        if cols and "mark_price" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN mark_price REAL")
+        if cols and "unrealized_pnl" not in cols:
+            db.execute("ALTER TABLE demo_positions ADD COLUMN unrealized_pnl REAL")
+        cols = {r[1] for r in db.execute("PRAGMA table_info(demo_orders)").fetchall()}
+        if cols and "leverage" not in cols:
+            db.execute("ALTER TABLE demo_orders ADD COLUMN leverage REAL DEFAULT 1")
+        cols = {r[1] for r in db.execute("PRAGMA table_info(demo_trades)").fetchall()}
+        if cols and "leverage" not in cols:
+            db.execute("ALTER TABLE demo_trades ADD COLUMN leverage REAL DEFAULT 1")
+        if cols and "roe_pct" not in cols:
+            db.execute("ALTER TABLE demo_trades ADD COLUMN roe_pct REAL")
+        if cols and "mark_price" not in cols:
+            db.execute("ALTER TABLE demo_trades ADD COLUMN mark_price REAL")
+    except Exception:
+        pass
     return db
 
 def insert_candle(c: dict, timeframe: str="1h") -> None:

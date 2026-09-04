@@ -218,7 +218,7 @@ def test_short_rejected_spot():
     r = eng.open_from_candidate(_frozen_candidate(side="SHORT", regime="TREND_BEAR",
                                                   entry=40000, stop=41000, tp1=39000,
                                                   dec_id=9005))
-    assert r["status"] == "REJECTED" and "SPOT_LONG_ONLY" in r["reason"]
+    assert r["status"] == "REJECTED" and "SHORT_NOT_SUPPORTED" in r["reason"]
     assert len(store.open_positions()) == 0
     print("short_rejected_spot PASS")
 

@@ -177,6 +177,12 @@ def _demo_exit_title(ev: dict) -> tuple[str, str]:
 
 
 # ---- trader-facing DEMO formatters ----------------------------------------
+def _demo_header(ev: dict) -> str:
+    """Market banner: spot 'BINANCE DEMO', futures 'BINANCE FUTURES DEMO'."""
+    return "BINANCE FUTURES DEMO" if str(ev.get("market") or ev.get("environment") or "").upper() == "FUTURES" \
+        or str(ev.get("environment") or "").upper() == "DEMO_FUTURES" else "BINANCE DEMO"
+
+
 def format_demo_filled(ev: dict) -> str:
     sym = (ev.get("symbol") or "?").upper()
     side = str(ev.get("side") or ev.get("decision") or "?").upper()
@@ -189,6 +195,9 @@ def format_demo_filled(ev: dict) -> str:
     qty = ev.get("quantity")
     qty_s = f"{float(qty):.6f}".rstrip("0").rstrip(".") if qty is not None else "n/a"
     ai = _ai_line(ev.get("ai_status"))
+    lev = ev.get("leverage")
+    lev_s = f"{float(lev):.0f}x" if lev is not None else "1x"
+    header = _demo_header(ev)
     return (f"\U0001F7E6 {sym} — DEMO {side}\n"
             f"\U0001F4CA {tf} · {regime}\n"
             f"\U0001F4B0 Entry   {entry}\n"
@@ -199,7 +208,8 @@ def format_demo_filled(ev: dict) -> str:
             f"Order:\n{ev.get('order_id') or '?'}\n"
             f"Status:\nOPEN\n"
             f"Size: {qty_s}\n"
-            f"BINANCE DEMO")
+            f"Leverage: {lev_s}\n"
+            f"{header}")
 
 
 def format_demo_exit(ev: dict) -> str:
@@ -212,14 +222,20 @@ def format_demo_exit(ev: dict) -> str:
     lines = [f"{icon} {title}", side, "", f"Entry: {entry}", f"Exit: {exit_px}"]
     if rr is not None:
         try:
-            lines += ["", f"Result:", f"{_signed(float(rr))}R"]
+            lines += ["", "Result:", f"{_signed(float(rr))}R"]
         except Exception:
             pass
     if pnl is not None:
         lines += ["", "PnL:", _signed(pnl)]
+    roe = ev.get("roe_pct")
+    if roe is not None:
+        try:
+            lines += ["", "ROE:", f"{float(roe):+.2f}%"]
+        except Exception:
+            pass
     if str(ev.get("exit_reason") or "").upper() == "TIME_EXIT":
-        lines += ["", f"Holding:", f"{ev.get('holding_bars')} bars"]
-    lines += ["", "Exit:", str(ev.get("exit_reason") or "?"), "", "BINANCE DEMO"]
+        lines += ["", "Holding:", f"{ev.get('holding_bars')} bars"]
+    lines += ["", "Exit:", str(ev.get("exit_reason") or "?"), "", _demo_header(ev)]
     return "\n".join(lines)
 
 

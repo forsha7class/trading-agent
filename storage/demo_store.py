@@ -29,11 +29,11 @@ def insert_demo_order(o: dict) -> dict:
         "id,decision_id,signal_id,symbol,side,requested_qty,executed_qty,"
         "requested_price,executed_price,stop,tp1,tp2,status,strategy_id,"
         "strategy_version,regime,risk_engine,ai_status,environment,created_at,"
-        "opened_at,closed_at,reject_reason)"
+        "opened_at,closed_at,reject_reason,leverage)"
         " VALUES(:id,:decision_id,:signal_id,:symbol,:side,:requested_qty,"
         ":executed_qty,:requested_price,:executed_price,:stop,:tp1,:tp2,:status,"
         ":strategy_id,:strategy_version,:regime,:risk_engine,:ai_status,"
-        ":environment,:created_at,:opened_at,:closed_at,:reject_reason)",
+        ":environment,:created_at,:opened_at,:closed_at,:reject_reason,:leverage)",
         {"id": order_id, "decision_id": o.get("decision_id"), "signal_id": o.get("signal_id"),
          "symbol": o.get("symbol"), "side": o.get("side"),
          "requested_qty": o.get("requested_qty"), "executed_qty": o.get("executed_qty", 0),
@@ -44,7 +44,8 @@ def insert_demo_order(o: dict) -> dict:
          "regime": o.get("regime"), "risk_engine": o.get("risk_engine"),
          "ai_status": o.get("ai_status"), "environment": o.get("environment", "DEMO"),
          "created_at": o.get("created_at", _now_ms()), "opened_at": o.get("opened_at"),
-         "closed_at": o.get("closed_at"), "reject_reason": o.get("reject_reason")})
+         "closed_at": o.get("closed_at"), "reject_reason": o.get("reject_reason"),
+         "leverage": o.get("leverage", 1)})
     return get_order(order_id) or {"id": order_id}
 
 
@@ -73,16 +74,22 @@ def insert_demo_position(p: dict) -> dict:
     db.execute(
         "INSERT OR IGNORE INTO demo_positions("
         "id,order_id,decision_id,symbol,side,entry,stop,tp1,tp2,size,open_qty,"
-        "status,opened_at,closed_at,environment)"
+        "status,opened_at,closed_at,environment,leverage,margin,notional,"
+        "liquidation_price,mark_price,unrealized_pnl)"
         " VALUES(:id,:order_id,:decision_id,:symbol,:side,:entry,:stop,:tp1,:tp2,"
-        ":size,:open_qty,:status,:opened_at,:closed_at,:environment)",
+        ":size,:open_qty,:status,:opened_at,:closed_at,:environment,:leverage,"
+        ":margin,:notional,:liquidation_price,:mark_price,:unrealized_pnl)",
         {"id": pid, "order_id": p.get("order_id"), "decision_id": p.get("decision_id"),
          "symbol": p.get("symbol"), "side": p.get("side"), "entry": p.get("entry"),
          "stop": p.get("stop"), "tp1": p.get("tp1"), "tp2": p.get("tp2"),
          "size": p.get("size"), "open_qty": p.get("open_qty"),
          "status": p.get("status", "OPEN"),
          "opened_at": p.get("opened_at", _now_ms()), "closed_at": p.get("closed_at"),
-         "environment": p.get("environment", "DEMO")})
+         "environment": p.get("environment", "DEMO"),
+         "leverage": p.get("leverage", 1),
+         "margin": p.get("margin"), "notional": p.get("notional"),
+         "liquidation_price": p.get("liquidation_price"),
+         "mark_price": p.get("mark_price"), "unrealized_pnl": p.get("unrealized_pnl")})
     return get_position(pid) or {"id": pid}
 
 
@@ -117,10 +124,11 @@ def insert_demo_trade(t: dict) -> dict:
     db.execute(
         "INSERT OR IGNORE INTO demo_trades("
         "id,position_id,order_id,decision_id,symbol,side,entry,exit_price,size,"
-        "qty,pnl,fees,exit_reason,mae,mfe,opened_at,closed_at,environment)"
+        "qty,pnl,fees,exit_reason,mae,mfe,opened_at,closed_at,environment,"
+        "leverage,roe_pct,mark_price)"
         " VALUES(:id,:position_id,:order_id,:decision_id,:symbol,:side,:entry,"
         ":exit_price,:size,:qty,:pnl,:fees,:exit_reason,:mae,:mfe,:opened_at,"
-        ":closed_at,:environment)",
+        ":closed_at,:environment,:leverage,:roe_pct,:mark_price)",
         {"id": tid, "position_id": t.get("position_id"), "order_id": t.get("order_id"),
          "decision_id": t.get("decision_id"), "symbol": t.get("symbol"),
          "side": t.get("side"), "entry": t.get("entry"), "exit_price": t.get("exit_price"),
@@ -128,7 +136,9 @@ def insert_demo_trade(t: dict) -> dict:
          "fees": t.get("fees"), "exit_reason": t.get("exit_reason"),
          "mae": t.get("mae"), "mfe": t.get("mfe"),
          "opened_at": t.get("opened_at", _now_ms()), "closed_at": t.get("closed_at"),
-         "environment": t.get("environment", "DEMO")})
+         "environment": t.get("environment", "DEMO"),
+         "leverage": t.get("leverage", 1),
+         "roe_pct": t.get("roe_pct"), "mark_price": t.get("mark_price")})
     return get_trade(tid) or {"id": tid}
 
 
@@ -149,6 +159,20 @@ def close_trade(pid: str, **fields) -> None:
     cols = ", ".join(f"{k}=?" for k in fields)
     get_db().execute(f"UPDATE demo_trades SET {cols} WHERE position_id=?",
                      (*fields.values(), pid))
+
+
+def mark_entry_pnl(decision_id, **fields) -> None:
+    """Record current mark/entry PnL on an OPEN position (futures observability).
+    No-op when no OPEN position exists for the decision (never fabricates)."""
+    p = get_position_by_decision(decision_id)
+    if p is None or p.get("status") != "OPEN":
+        return None
+    if not fields:
+        return p
+    cols = ", ".join(f"{k}=?" for k in fields)
+    get_db().execute(f"UPDATE demo_positions SET {cols} WHERE id=?",
+                     (*fields.values(), p["id"]))
+    return get_position(p["id"])
 
 
 # ---- lifecycle events (dedup: decision_id + event_type) ---------------------

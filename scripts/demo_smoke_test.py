@@ -34,21 +34,37 @@ def main() -> int:
         print("REFUSED: SMOKE_AUTHORIZED=1 required (explicit operator authorization).")
         return 2
 
-    # 1. env gate
+    # 1. env gate (kind-aware: DEMO_KIND=FUTURES targets the futures testnet)
     from execution import env as exenv
     st = exenv.demo_env_status()
-    print(f"mode={st['mode']} demo_ready={st['demo_ready']} endpoint={st['endpoint']}")
+    kind = st.get("kind", "SPOT")
+    print(f"mode={st['mode']} kind={kind} demo_ready={st['demo_ready']} "
+          f"endpoint={st['endpoint']}")
     print("gate reasons:", st["reasons"])
     if not st["demo_ready"]:
         print("NO ORDER — demo environment not ready.")
         return 3
 
     # 2. broker connectivity (read-only)
-    from execution.demo_broker import DemoBroker
-    broker = DemoBroker()
+    if kind == "FUTURES":
+        from execution.futures_broker import FuturesDemoBroker
+        broker = FuturesDemoBroker()
+    else:
+        from execution.demo_broker import DemoBroker
+        broker = DemoBroker()
     print("ping:", broker.ping())
-    acct = broker.account_snapshot()
-    print("balances:", {k: round(v, 6) for k, v in acct["balances"].items()})
+    try:
+        acct = broker.account_snapshot()
+        print("balances:", {k: round(v.get("available", v), 6)
+                            for k, v in acct["balances"].items()})
+    except Exception as e:
+        acct = None
+        print("account snapshot unavailable:", type(e).__name__)
+    if kind == "FUTURES":
+        print("position mode:", broker.get_position_mode())
+        sym_info = broker.symbol_info(args.symbol)
+        print(f"{args.symbol} contract: {sym_info.get('contractType')} "
+              f"status={sym_info.get('status')}")
 
     # 3. build frozen candidate from live data
     from ingestion.market_data import fetch_klines
@@ -56,6 +72,8 @@ def main() -> int:
     candles = fetch_klines(args.symbol, args.timeframe, limit=100)
     cand = build_demo_candidate(candles, symbol=args.symbol, timeframe=args.timeframe,
                                 equity=args.equity, use_llm=False)
+    cand["leverage"] = int(os.getenv("DEMO_LEVERAGE", "1") or 1)
+    cand["environment"] = "DEMO_FUTURES" if kind == "FUTURES" else "DEMO"
     chain = traceable_chain(cand)
     print("candidate:", chain)
 
@@ -63,8 +81,12 @@ def main() -> int:
     if not cand.get("eligibility", {}).get("eligible"):
         print(f"NO ORDER — candidate not eligible: {chain.get('eligibility_reason')}")
         return 4
-    if str(cand.get("decision") or "").upper() != "LONG":
-        print(f"NO ORDER — spot supports LONG only (decision={cand.get('decision')})")
+    decision = str(cand.get("decision") or "").upper()
+    if kind == "SPOT" and decision != "LONG":
+        print(f"NO ORDER — spot supports LONG only (decision={decision})")
+        return 4
+    if kind == "FUTURES" and decision not in ("LONG", "SHORT"):
+        print(f"NO ORDER — futures needs LONG/SHORT (decision={decision})")
         return 4
 
     if args.dry_run:

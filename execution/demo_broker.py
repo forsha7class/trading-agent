@@ -120,6 +120,26 @@ class DemoBroker:
             "quantity": f"{quantity:.8f}", "newOrderRespType": "FULL"})
         return self._map_order(j)
 
+    # ---- engine-facing unified surface (spot: LONG-only) ------------------------
+    @property
+    def market(self) -> str:
+        return "SPOT"
+
+    @property
+    def capabilities(self) -> dict:
+        return {"market": "SPOT", "long": True, "short": False, "leverage_max": 1}
+
+    def market_open(self, symbol: str, side: str, quantity: float) -> dict:
+        """Spot open = market BUY (LONG only). SHORT rejected (not executable)."""
+        if str(side).upper() != "LONG":
+            return {"status": "REJECTED", "reason": "spot supports LONG/BUY only",
+                    "symbol": symbol}
+        return self.market_buy(symbol, quantity)
+
+    def market_close(self, symbol: str, side: str, quantity: float) -> dict:
+        """Spot close = market SELL of the held base asset (any open side)."""
+        return self.market_sell(symbol, quantity)
+
     def order_status(self, order_id: str) -> dict:
         j = self._signed("GET", "/api/v3/order",
                          {"symbol": self._symbol_of(order_id), "origClientOrderId": order_id})
