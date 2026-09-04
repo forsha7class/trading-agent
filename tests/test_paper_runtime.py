@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # isolated test DB (never the live trading.db)
 import os
-_TEST_DB = "/tmp/paper_runtime_test.db"
+import conftest  # noqa: F401 — TRADING_TG_SEND=0 + DB_PATH already isolated before imports
+_TEST_DB = os.environ.get("TESTS_DB_PATH", "/tmp/paper_runtime_test.db")
 for suffix in ("", "-wal", "-shm"):
     p = _TEST_DB + suffix
     if os.path.exists(p):

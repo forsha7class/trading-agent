@@ -34,12 +34,23 @@ _API = "https://api.telegram.org/bot"
 
 
 def _creds():
-    """Resolve token+chat from env. Prefer dedicated trading vars, then Hermes generic."""
+    """Resolve token+chat from env. Prefer dedicated trading vars, then Hermes generic.
+
+    Sending is DISABLED unless TRADING_TG_SEND=1 (safety default: tests and any
+    process without an explicit opt-in can never send a real Telegram message).
+    Returns (token, chat) only when sending is enabled AND credentials exist.
+    """
+    if os.getenv("TRADING_TG_SEND") != "1":
+        return None, None
     token = (os.getenv("TRADING_TG_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
     chat = (os.getenv("TRADING_TG_CHAT_ID")
             or os.getenv("TELEGRAM_CHAT_ID")
             or os.getenv("TELEGRAM_HOME_CHANNEL") or "").strip()
     return token, chat
+
+
+def _disabled_result() -> dict:
+    return {"sent": False, "deduped": False, "reason": "telegram_send_disabled", "error": None}
 
 
 def configured() -> bool:
@@ -183,9 +194,10 @@ def notify(event_type: str, ev: dict, cooldown_s: float = DEFAULT_COOLDOWN_S) ->
     """
     if event_type not in _EVENT_TYPES:
         return {"sent": False, "deduped": False, "error": f"unknown event type {event_type}"}
+    if not configured():
+        return _disabled_result() if os.getenv("TRADING_TG_SEND") != "1" else {
+            "sent": False, "deduped": False, "error": "missing telegram credentials"}
     token, chat = _creds()
-    if not token or not chat:
-        return {"sent": False, "deduped": False, "error": "missing telegram credentials"}
     stable_id = str(ev.get("decision_id") or ev.get("signal_id") or ev.get("id") or "")
     if not _allow_send(event_type, stable_id, cooldown_s):
         return {"sent": False, "deduped": True, "error": None}

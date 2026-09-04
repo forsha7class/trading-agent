@@ -6,12 +6,18 @@ Does not require live network/credentials (LLM & Telegram are mocked or missing)
 import sys, os, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+try:
+    import conftest  # noqa: F401 — forces TRADING_TG_SEND=0 + isolated DB before any project import
+except ImportError:
+    pass
 
 def _reset_env():
     for k in ("OPENAI_API_KEY","OPENAI_BASE_URL","LLM_MODEL",
               "TRADING_TG_BOT_TOKEN","TRADING_TG_CHAT_ID",
               "TELEGRAM_BOT_TOKEN","TELEGRAM_CHAT_ID","TELEGRAM_HOME_CHANNEL"):
         os.environ.pop(k, None)
+    # re-assert the safety default (never send during tests)
+    os.environ.setdefault("TRADING_TG_SEND", "0")
 
 def _mock_llm_none(monkeypatch=None):
     import agents.llm
@@ -139,15 +145,56 @@ def test_contract_keys_present():
 
 # ---------- Telegram ----------
 def _tg_creds_set():
+    """Enable real-send path with fake creds (guard requires TRADING_TG_SEND=1)."""
+    os.environ["TRADING_TG_SEND"]="1"
     os.environ["TRADING_TG_BOT_TOKEN"]="test:token"
     os.environ["TRADING_TG_CHAT_ID"]="12345"
+
+def _tg_creds_clear():
+    for k in ("TRADING_TG_SEND","TRADING_TG_BOT_TOKEN","TRADING_TG_CHAT_ID"):
+        os.environ.pop(k, None)
+    os.environ.setdefault("TRADING_TG_SEND", "0")
+
+def test_tg_disabled_by_default():
+    """Safety default: no TRADING_TG_SEND=1 -> notify returns disabled, never sends,
+    even with production-looking creds present."""
+    from agents import telegram_notifier as tg
+    _tg_creds_clear()
+    os.environ["TRADING_TG_BOT_TOKEN"]="fake-prod-token"
+    os.environ["TRADING_TG_CHAT_ID"]="12345"
+    import agents.telegram_notifier as m
+    real_post = m.httpx.post
+    calls = []
+    def spy(*a, **k):
+        calls.append(a)
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"ok": True}
+        return _R()
+    m.httpx.post = spy
+    try:
+        res = tg.notify(tg.EVENT_SIGNAL, {"symbol":"BTCUSDT","decision":"LONG","decision_id":"D1"})
+        assert res["sent"] is False, res
+        assert res.get("reason") == "telegram_send_disabled", res
+        assert res["error"] is None
+        assert calls == [], "network must not be touched when sending is disabled"
+        # format/dedup unaffected
+        msg = tg.format_signal({"symbol":"BTCUSDT","decision":"LONG","regime":"TREND_BULL","p_up":0.7,
+            "entry":1,"stop":2,"tp1":3,"tp2":4,"rr":1.5,"risk_pct":0.005,"evidence":[],"counter_evidence":[]})
+        assert "BTCUSDT" in msg and "LONG" in msg
+    finally:
+        m.httpx.post = real_post
+        tg._last_sent.clear(); _tg_creds_clear()
+    print("tg_disabled_by_default PASS")
 
 def test_tg_missing_credentials_nonfatal():
     from agents import telegram_notifier as tg
     _reset_env()
+    os.environ["TRADING_TG_SEND"]="1"  # enabled but no creds -> missing creds
     res = tg.notify(tg.EVENT_SIGNAL, {"symbol":"BTCUSDT","decision":"LONG"})
     assert res["sent"] is False
     assert res["error"] == "missing telegram credentials"
+    _tg_creds_clear()
     print("tg_missing_credentials_nonfatal PASS")
 
 def test_tg_format_signal():
@@ -168,7 +215,7 @@ def test_tg_format_signal():
 
 def test_tg_special_chars_plain_text():
     from agents import telegram_notifier as tg
-    _tg_creds_set()
+    _tg_creds_set()  # TRADING_TG_SEND=1 + fake creds
     tg._last_sent.clear()
     import agents.telegram_notifier as m
     captured = {}
@@ -197,8 +244,44 @@ def test_tg_special_chars_plain_text():
         assert "decision_id" not in txt  # not required; payload shape sanity only
     finally:
         m.httpx.post = real
-        tg._last_sent.clear(); _reset_env()
+        tg._last_sent.clear(); _tg_creds_clear()
     print("tg_special_chars_plain_text PASS")
+
+
+def test_tg_send_only_with_explicit_optin():
+    """Integration opt-in: with TRADING_TG_SEND=1 the send path runs; without it the
+    same event is refused. Network is stubbed — this proves the guard, not a live send."""
+    from agents import telegram_notifier as tg
+    import agents.telegram_notifier as m
+    real_post = m.httpx.post
+    captured = []
+    def fake_post(url, **kw):
+        captured.append(kw.get("json"))
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"ok": True}
+        return _R()
+    ev = {"symbol":"BTCUSDT","decision":"LONG","decision_id":"OPTIN1","regime":"TREND_BULL"}
+    try:
+        m.httpx.post = fake_post
+        # 1) disabled (default) -> refused, no network
+        _tg_creds_clear()
+        os.environ["TRADING_TG_BOT_TOKEN"]="test:token"
+        os.environ["TRADING_TG_CHAT_ID"]="12345"
+        tg._last_sent.clear()
+        r_off = tg.notify(tg.EVENT_SIGNAL, dict(ev))
+        assert r_off["sent"] is False and r_off.get("reason") == "telegram_send_disabled", r_off
+        assert captured == []
+        # 2) opt-in -> send path executes (stubbed)
+        os.environ["TRADING_TG_SEND"]="1"
+        tg._last_sent.clear()
+        r_on = tg.notify(tg.EVENT_SIGNAL, dict(ev))
+        assert r_on["sent"] is True, r_on
+        assert len(captured) == 1 and captured[0]["chat_id"] == "12345"
+    finally:
+        m.httpx.post = real_post
+        tg._last_sent.clear(); _tg_creds_clear()
+    print("tg_send_only_with_explicit_optin PASS")
 
 def test_tg_dedup():
     from agents import telegram_notifier as tg
@@ -259,8 +342,10 @@ if __name__=="__main__":
     test_risk_veto_not_overridden_by_ai_pass()
     test_malformed_llm_to_unavailable()
     test_tg_missing_credentials_nonfatal()
+    test_tg_disabled_by_default()
     test_tg_format_signal()
     test_tg_special_chars_plain_text()
+    test_tg_send_only_with_explicit_optin()
     test_tg_dedup()
     test_tg_failure_nonfatal()
     test_redact_secret()

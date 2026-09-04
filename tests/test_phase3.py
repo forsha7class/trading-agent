@@ -3,6 +3,8 @@ import sys, time, math
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import conftest  # noqa: F401 — isolated DB + TRADING_TG_SEND=0 before project imports
+
 from storage.database import init_db
 from ingestion.dataset import store_dataset, load_dataset, dataset_metadata
 from ingestion.validation import validate_candles

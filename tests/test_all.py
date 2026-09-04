@@ -1,6 +1,7 @@
 import math, time, sys, json
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import conftest  # noqa: F401 — isolated DB + TRADING_TG_SEND=0 before project imports
 from ingestion.validation import validate_candles
 from features.technical import build_features, sma, ema, rsi14, atr14
 from regime.detector import detect_regime
